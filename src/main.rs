@@ -1,7 +1,12 @@
+mod commands;
+
 use dotenv::dotenv;
 use std::env;
+use std::time::Duration;
 
 use serenity::async_trait;
+
+use serenity::framework::standard::StandardFramework;
 use serenity::model::channel::Message;
 use serenity::model::gateway::Ready;
 use serenity::prelude::*;
@@ -16,12 +21,8 @@ impl EventHandler for Handler {
     // Event handlers are dispatched through a threadpool, and so multiple
     // events can be dispatched simultaneously.
     async fn message(&self, ctx: Context, msg: Message) {
-        if let Some(command) = Command::from_str(&msg.content) {
-            // Sending a message can fail, due to a network error, an
-            // authentication error, or lack of permissions to post in the
-            // channel, so log to stdout when some error happens, with a
-            // description of it.
-            if let Err(why) = send_embed(&msg, &ctx, command).await {
+        if msg.mention_everyone {
+            if let Err(why) = handle_mention_everyone(&msg, &ctx).await {
                 println!("Error sending message: {:?}", why);
             }
         }
@@ -38,66 +39,23 @@ impl EventHandler for Handler {
     }
 }
 
-struct Command {
-    name: String,
-    title: String,
-    description: String,
-}
-
-impl Command {
-    fn from_str(s: &str) -> Option<Command> {
-        match matches_message(s) {
-            Some("!ping") => Some(Command {
-                name: "!ping".to_string(),
-                title: "Pinging other members".to_string(),
-                description: "Do not ping other people in order to get attention to your question unless they are actively involved in the discussion.".to_string(),
-            }),
-            Some("!promotion") => Some(Command {
-                name: "!promotion".to_string(),
-                title: "Self promotion".to_string(),
-                description: "We have a few channels that allow for self-promotion [#showcase, #community-content]. Sharing promotional links such as referral links, giveaways/contests
-                or anything that would be a plain advertisment is discouraged and may be removed.".to_string(),
-            }),
-            Some("!jobs") => Some(Command {
-                name: "!jobs".to_string(),
-                title: "Job postings".to_string(),
-                description: "We currently do not allow job posts in this server, unless it's in the context of a discussion. If you're looking to get hired or to advertise a job vacancy
-                see #jobs.".to_string(),
-            }),
-            Some("!DM") => Some(Command {
-                name: "!DM".to_string(),
-                title: "Sending direct messages to other members".to_string(),
-                description: "Do not directly message other members without asking first. If you're looking to get help, it is a lot better to post your question in the applicable channel publicly.".to_string(),
-            }),
-            _ => None,
-        }
-    }
-}
-
-fn matches_message(command: &str) -> Option<&str> {
-    let content = command.trim();
-
-    if content.starts_with(command) || command.eq(content) {
-        return Some(command);
-    }
-
-    None
-}
-
-async fn send_embed(
-    msg: &Message,
-    ctx: &Context,
-    command: Command,
-) -> Result<serenity::model::channel::Message, serenity::Error> {
-    msg.channel_id
+async fn handle_mention_everyone(msg: &Message, ctx: &Context) -> Result<(), SerenityError> {
+    let message = msg
+        .channel_id
         .send_message(&ctx.http, |m| {
-            m.embed(|e| {
-                e.title(command.title);
-                e.description(command.description);
-                e
+            m.reference_message(msg).embed(|e| {
+                e.title("Don't ping everyone!")
+                    .description("Please do not use `@everyone` or `@here`.")
+                    .footer(|f| f.text("This message will be deleted in 5 seconds."))
+                    .color((255, 0, 0))
             })
         })
-        .await
+        .await;
+
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    msg.delete(&ctx.http).await?;
+    message.unwrap().delete(&ctx.http).await?;
+    Ok(())
 }
 
 #[tokio::main]
@@ -111,11 +69,20 @@ async fn main() {
         | GatewayIntents::DIRECT_MESSAGES
         | GatewayIntents::MESSAGE_CONTENT;
 
+    let framework = StandardFramework::new()
+        .configure(|c| c.prefix("!").case_insensitivity(true))
+        // The `#[group]` (and similarly, `#[command]`) macro generates static instances
+        // containing any options you gave it. For instance, the group `name` and its `commands`.
+        // Their identifiers, names you can use to refer to these instances in code, are an
+        // all-uppercased version of the `name` with a `_GROUP` suffix appended at the end.
+        .group(&commands::common::GENERAL_GROUP);
+
     // Create a new instance of the Client, logging in as a bot. This will
     // automatically prepend your bot token with "Bot ", which is a requirement
     // by Discord for bot users.
     let mut client = Client::builder(&token, intents)
         .event_handler(Handler)
+        .framework(framework)
         .await
         .expect("Err creating client");
 
